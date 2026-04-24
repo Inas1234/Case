@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, LogOut, Minus, Plus, Sparkles } from "lucide-react";
+import { Download, LogOut, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -50,11 +50,17 @@ type AiAction =
   | "Compress"
   | "Suggest next test";
 
+const priorityTagOrder = ["critical", "useful", "optional", "distracting"] as const;
+const priorityTagSet = new Set<CardTag>(priorityTagOrder);
+
 const typeToTag: Record<CardType, CardTag> = {
   Thought: "idea",
   Question: "question",
   Evidence: "evidence",
   Screenshot: "evidence",
+  Idea: "idea",
+  User: "user",
+  Problem: "problem",
   Assumption: "assumption",
   Risk: "risk",
   Contradiction: "problem",
@@ -62,26 +68,70 @@ const typeToTag: Record<CardType, CardTag> = {
   Conclusion: "conclusion",
 };
 
-const aiActionToCardType: Record<AiAction, CardType> = {
-  Organize: "Conclusion",
-  Challenge: "Question",
-  "Find contradictions": "Contradiction",
-  Compress: "Conclusion",
-  "Suggest next test": "Experiment",
-};
+interface AiBoardActionRequest {
+  role: AiRole;
+  action: AiAction;
+  selectedCardIds?: string[];
+  board: {
+    title: string;
+    status: BoardStatus;
+    verdict?: Verdict | null;
+    summary: {
+      thesis: string;
+      topRisk: string;
+      topOpenQuestions: string[];
+      recommendedNextStep: string;
+    };
+    cards: Array<{
+      id: string;
+      type: CardType;
+      title: string;
+      content: string;
+      tags: CardTag[];
+    }>;
+  };
+}
 
-const aiActionToCopy: Record<AiAction, string> = {
-  Organize:
-    "Cluster existing cards around one thesis and mark duplicates as lower priority.",
-  Challenge:
-    "Test the strongest assumption first: why would users switch from current behavior?",
-  "Find contradictions":
-    "One card claims speed is the edge while another says reliability matters most.",
-  Compress:
-    "Keep the user acquisition problem in focus and defer tooling details for later.",
-  "Suggest next test":
-    "Run 5 targeted interviews with one narrow persona and validate willingness to pay.",
-};
+interface AiCardDraft {
+  type: CardType;
+  title: string;
+  content: string;
+  tags: CardTag[];
+}
+
+interface AiCardUpdate {
+  cardId: string;
+  type?: CardType;
+  tags?: CardTag[];
+}
+
+interface AiSummaryUpdate {
+  thesis?: string;
+  topRisk?: string;
+  topOpenQuestions?: string[];
+  recommendedNextStep?: string;
+  status?: BoardStatus;
+}
+
+interface AiBoardActionResponse {
+  note?: string;
+  cardsToCreate?: AiCardDraft[];
+  cardUpdates?: AiCardUpdate[];
+  summaryUpdate?: AiSummaryUpdate;
+  actionMeta?: {
+    mostImportantWeakAssumption?: string;
+    mostImportantMissingClarity?: string;
+    riskiestAssumption?: string;
+    ignoreForNow?: string[];
+    verdictSuggestion?: Verdict | null;
+    diminishingReturns?: boolean;
+  };
+  model?: string;
+  provider?: string | null;
+  fallback?: boolean;
+  warning?: string;
+  error?: string;
+}
 
 type DbCardRow = {
   id: string;
@@ -118,6 +168,78 @@ function mapCardRow(row: DbCardRow): BoardCard {
       y: Number(row.position_y ?? 120),
     },
     aiOrigin: Boolean(row.ai_origin),
+  };
+}
+
+function dedupeTags(tags: CardTag[]) {
+  return Array.from(new Set(tags));
+}
+
+function sanitizeCardTags(type: CardType, tags: CardTag[]) {
+  const safeTags = dedupeTags(tags).filter((tag) => cardTags.includes(tag));
+  if (!safeTags.includes(typeToTag[type])) {
+    safeTags.unshift(typeToTag[type]);
+  }
+  const hasPriority = safeTags.some((tag) => priorityTagSet.has(tag));
+  if (!hasPriority) {
+    safeTags.push("useful");
+  }
+  return dedupeTags(safeTags).slice(0, 6);
+}
+
+function sanitizeSummaryUpdate(update: AiSummaryUpdate | undefined) {
+  if (!update) {
+    return undefined;
+  }
+
+  return {
+    thesis: typeof update.thesis === "string" ? update.thesis.trim() : undefined,
+    topRisk: typeof update.topRisk === "string" ? update.topRisk.trim() : undefined,
+    topOpenQuestions: Array.isArray(update.topOpenQuestions)
+      ? update.topOpenQuestions
+          .map((question) => question.trim())
+          .filter((question) => question.length > 0)
+          .slice(0, 3)
+      : undefined,
+    recommendedNextStep:
+      typeof update.recommendedNextStep === "string"
+        ? update.recommendedNextStep.trim()
+        : undefined,
+    status:
+      update.status && boardStatuses.includes(update.status as BoardStatus)
+        ? (update.status as BoardStatus)
+        : undefined,
+  };
+}
+
+function buildAiRequestPayload(
+  board: Board,
+  role: AiRole,
+  action: AiAction,
+  selectedCardId: string | null,
+): AiBoardActionRequest {
+  return {
+    role,
+    action,
+    selectedCardIds: selectedCardId ? [selectedCardId] : [],
+    board: {
+      title: board.title,
+      status: board.status,
+      verdict: board.verdict,
+      summary: {
+        thesis: board.summary.thesis,
+        topRisk: board.summary.topRisk,
+        topOpenQuestions: board.summary.topOpenQuestions,
+        recommendedNextStep: board.summary.recommendedNextStep,
+      },
+      cards: board.cards.slice(-40).map((card) => ({
+        id: card.id,
+        type: card.type,
+        title: card.title.slice(0, 180),
+        content: card.content.slice(0, 2200),
+        tags: card.tags,
+      })),
+    },
   };
 }
 
@@ -179,6 +301,8 @@ export function BoardWorkspace({
   );
   const [zoom, setZoom] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const [isDeletingCard, setIsDeletingCard] = useState(false);
   const [isLoadingBoard, setIsLoadingBoard] = useState(false);
   const [errorText, setErrorText] = useState("");
 
@@ -493,66 +617,264 @@ export function BoardWorkspace({
   };
 
   const handleAiAction = async (action: AiAction) => {
-    if (!board) {
+    if (!board || isAiThinking) {
       return;
     }
 
+    const boardSnapshot = board;
     const boardId = board.id;
-    const aiCardType = aiActionToCardType[action];
-    const { data, error } = await supabase
-      .from("board_cards")
-      .insert({
-        board_id: boardId,
-        created_by: userId,
-        type: aiCardType,
-        title: `${action} (${aiRole})`,
-        content: aiActionToCopy[action],
-        tags: [typeToTag[aiCardType]],
-        position_x: 640,
-        position_y: 180 + board.cards.length * 14,
-        ai_origin: true,
-      })
-      .select("*")
-      .single();
+    setIsAiThinking(true);
+    setErrorText("");
 
-    if (error || !data) {
-      setErrorText(error?.message ?? "Could not add AI note.");
-      return;
-    }
+    let aiPayload: AiBoardActionResponse | null = null;
+    let usedFallback = false;
+    let modelLabel = "";
 
-    const nextCard = mapCardRow(data as DbCardRow);
-    setLastAiAction(`${action} completed with role ${aiRole}.`);
-    setBoard((prev) => {
-      if (!prev) {
-        return prev;
+    try {
+      const aiResponse = await fetch("/api/ai/board-action", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(buildAiRequestPayload(boardSnapshot, aiRole, action, selectedCardId)),
+      });
+
+      const payload = (await aiResponse.json()) as AiBoardActionResponse;
+      if (!aiResponse.ok) {
+        throw new Error(payload.error ?? "AI request failed.");
       }
 
-      const nextStatus = action === "Compress" ? "Narrowing" : prev.status;
-      return {
-        ...prev,
-        cards: [...prev.cards, nextCard],
-        status: nextStatus,
-        summary: {
-          ...prev.summary,
-          recommendedNextStep:
-            action === "Suggest next test"
-              ? "Run the proposed narrow test this week and report objective outcomes."
-              : prev.summary.recommendedNextStep,
-          status: nextStatus,
-        },
-        updatedAt: new Date().toISOString(),
-      };
-    });
-    setSelectedCardId(nextCard.id);
-    setBoards((prev) =>
-      updateBoardListEntry(prev, boardId, {
-        status: action === "Compress" ? "Narrowing" : board.status,
-      }),
-    );
+      aiPayload = payload;
+      usedFallback = Boolean(payload.fallback);
 
-    if (action === "Compress") {
-      await persistBoardPatch(boardId, { status: "Narrowing" });
+      if (typeof payload.model === "string" && payload.model.trim().length > 0) {
+        modelLabel = ` via ${payload.model}`;
+      }
+
+      if (typeof payload.warning === "string" && payload.warning.trim().length > 0) {
+        setErrorText(payload.warning);
+      }
+      const cardsToCreate = Array.isArray(aiPayload.cardsToCreate)
+        ? aiPayload.cardsToCreate
+            .filter((card): card is AiCardDraft => cardTypes.includes(card.type as CardType))
+            .map((card) => {
+              const type = card.type;
+              const title = card.title.trim().slice(0, 160) || `${action} (${aiRole})`;
+              const content = card.content.trim().slice(0, 700) || "No details provided.";
+              const tags = sanitizeCardTags(type, card.tags ?? [typeToTag[type]]);
+              return {
+                type,
+                title,
+                content,
+                tags,
+              };
+            })
+        : [];
+
+      const cardUpdates = Array.isArray(aiPayload.cardUpdates)
+        ? aiPayload.cardUpdates
+            .filter((update) => typeof update.cardId === "string" && update.cardId.trim().length > 0)
+            .map((update) => {
+              const nextType =
+                update.type && cardTypes.includes(update.type as CardType)
+                  ? (update.type as CardType)
+                  : undefined;
+              const nextTags = Array.isArray(update.tags)
+                ? (update.tags.filter((tag): tag is CardTag => cardTags.includes(tag as CardTag)) as CardTag[])
+                : undefined;
+              return {
+                cardId: update.cardId,
+                type: nextType,
+                tags: nextType && nextTags ? sanitizeCardTags(nextType, nextTags) : nextTags,
+              };
+            })
+        : [];
+
+      const successfulUpdates: AiCardUpdate[] = [];
+      await Promise.all(
+        cardUpdates.map(async (update) => {
+          const patch: Partial<{
+            type: CardType;
+            tags: CardTag[];
+          }> = {};
+          if (update.type) {
+            patch.type = update.type;
+          }
+          if (update.tags && update.tags.length > 0) {
+            patch.tags = dedupeTags(update.tags).slice(0, 6);
+          }
+          if (!patch.type && !patch.tags) {
+            return;
+          }
+          const ok = await persistCardPatch(update.cardId, patch);
+          if (ok) {
+            successfulUpdates.push({
+              cardId: update.cardId,
+              type: patch.type,
+              tags: patch.tags,
+            });
+          }
+        }),
+      );
+
+      let insertedCards: BoardCard[] = [];
+      if (cardsToCreate.length > 0) {
+        const { data, error } = await supabase
+          .from("board_cards")
+          .insert(
+            cardsToCreate.map((card, index) => ({
+              board_id: boardId,
+              created_by: userId,
+              type: card.type,
+              title: card.title,
+              content: card.content,
+              tags: card.tags,
+              position_x: 620 + (index % 2) * 460,
+              position_y: 180 + Math.floor(index / 2) * 210 + boardSnapshot.cards.length * 8,
+              ai_origin: true,
+            })),
+          )
+          .select("*");
+
+        if (error) {
+          throw new Error(error.message || "Could not add AI notes.");
+        }
+
+        insertedCards = ((data ?? []) as DbCardRow[]).map(mapCardRow);
+      }
+
+      const summaryUpdate = sanitizeSummaryUpdate(aiPayload.summaryUpdate);
+      const nextStatus = summaryUpdate?.status ?? boardSnapshot.status;
+      const boardPatch: Record<string, unknown> = {};
+      if (summaryUpdate?.thesis !== undefined) {
+        boardPatch.thesis = summaryUpdate.thesis;
+      }
+      if (summaryUpdate?.topRisk !== undefined) {
+        boardPatch.top_risk = summaryUpdate.topRisk;
+      }
+      if (summaryUpdate?.topOpenQuestions !== undefined) {
+        boardPatch.top_open_questions = summaryUpdate.topOpenQuestions;
+      }
+      if (summaryUpdate?.recommendedNextStep !== undefined) {
+        boardPatch.recommended_next_step = summaryUpdate.recommendedNextStep;
+      }
+      if (nextStatus !== boardSnapshot.status) {
+        boardPatch.status = nextStatus;
+      }
+
+      if (Object.keys(boardPatch).length > 0) {
+        await persistBoardPatch(boardId, boardPatch);
+      }
+
+      setBoard((prev) => {
+        if (!prev) {
+          return prev;
+        }
+
+        const updatesById = new Map(successfulUpdates.map((update) => [update.cardId, update]));
+        const updatedCards = prev.cards.map((card) => {
+          const update = updatesById.get(card.id);
+          if (!update) {
+            return card;
+          }
+
+          const nextType = update.type ?? card.type;
+          const nextTags =
+            update.tags && update.tags.length > 0
+              ? sanitizeCardTags(nextType, update.tags)
+              : card.tags;
+
+          return {
+            ...card,
+            type: nextType,
+            tags: nextTags,
+          };
+        });
+
+        return {
+          ...prev,
+          cards: [...updatedCards, ...insertedCards],
+          status: nextStatus,
+          summary: {
+            ...prev.summary,
+            thesis: summaryUpdate?.thesis ?? prev.summary.thesis,
+            topRisk: summaryUpdate?.topRisk ?? prev.summary.topRisk,
+            topOpenQuestions: summaryUpdate?.topOpenQuestions ?? prev.summary.topOpenQuestions,
+            recommendedNextStep:
+              summaryUpdate?.recommendedNextStep ?? prev.summary.recommendedNextStep,
+            status: nextStatus,
+          },
+          updatedAt: new Date().toISOString(),
+        };
+      });
+
+      if (insertedCards.length > 0) {
+        setSelectedCardId(insertedCards[insertedCards.length - 1].id);
+      }
+      setBoards((prev) =>
+        updateBoardListEntry(prev, boardId, {
+          status: nextStatus,
+        }),
+      );
+
+      const notePrefix =
+        aiPayload.note && aiPayload.note.trim().length > 0
+          ? aiPayload.note.trim()
+          : `${action} completed with role ${aiRole}.`;
+      const riskTail =
+        aiPayload.actionMeta?.riskiestAssumption &&
+        aiPayload.actionMeta.riskiestAssumption.trim().length > 0
+          ? ` Riskiest assumption: ${aiPayload.actionMeta.riskiestAssumption.trim()}`
+          : "";
+
+      setLastAiAction(
+        `${notePrefix}${usedFallback ? " (fallback output)." : `${modelLabel}.`}${riskTail}`,
+      );
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : "AI action failed.");
+    } finally {
+      setIsAiThinking(false);
     }
+  };
+
+  const handleDeleteSelectedCard = async () => {
+    if (!board || !selectedCard || isDeletingCard) {
+      return;
+    }
+
+    setIsDeletingCard(true);
+    setErrorText("");
+
+    const boardId = board.id;
+    const selectedId = selectedCard.id;
+    const selectedIndex = board.cards.findIndex((card) => card.id === selectedId);
+
+    const { error } = await supabase.from("board_cards").delete().eq("id", selectedId);
+
+    if (error) {
+      setErrorText(error.message);
+      setIsDeletingCard(false);
+      return;
+    }
+
+    const remainingCards = board.cards.filter((card) => card.id !== selectedId);
+    const nextSelected =
+      remainingCards[selectedIndex] ??
+      remainingCards[Math.max(selectedIndex - 1, 0)] ??
+      null;
+
+    setBoard((prev) =>
+      prev
+        ? {
+            ...prev,
+            cards: prev.cards.filter((card) => card.id !== selectedId),
+            updatedAt: new Date().toISOString(),
+          }
+        : prev,
+    );
+    setSelectedCardId(nextSelected?.id ?? null);
+    setBoards((prev) => updateBoardListEntry(prev, boardId, {}));
+    setIsDeletingCard(false);
   };
 
   const handleStatusChange = async (status: BoardStatus) => {
@@ -852,7 +1174,11 @@ export function BoardWorkspace({
           <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">AI Actions</p>
           <div className="mt-3 space-y-2">
             <label className="text-xs text-muted-foreground">Role</label>
-            <Select value={aiRole} onValueChange={(value) => setAiRole(value as AiRole)} disabled={!board}>
+            <Select
+              value={aiRole}
+              onValueChange={(value) => setAiRole(value as AiRole)}
+              disabled={!board || isAiThinking}
+            >
               <SelectTrigger className="w-full">
                 <SelectValue />
               </SelectTrigger>
@@ -880,13 +1206,14 @@ export function BoardWorkspace({
                 variant="outline"
                 className="justify-start border-border/70"
                 onClick={() => void handleAiAction(action)}
-                disabled={!board}
+                disabled={!board || isAiThinking}
               >
                 <Sparkles />
                 {action}
               </Button>
             ))}
           </div>
+          {isAiThinking ? <p className="mt-3 text-xs text-muted-foreground">AI is thinking...</p> : null}
           {lastAiAction ? <p className="mt-3 text-xs text-muted-foreground">{lastAiAction}</p> : null}
           {errorText ? <p className="mt-3 text-xs text-destructive">{errorText}</p> : null}
 
@@ -952,6 +1279,14 @@ export function BoardWorkspace({
                       }
                     />
                   </div>
+                  <Button
+                    variant="destructive"
+                    onClick={() => void handleDeleteSelectedCard()}
+                    disabled={isDeletingCard}
+                  >
+                    <Trash2 />
+                    {isDeletingCard ? "Deleting..." : "Delete note"}
+                  </Button>
                 </>
               ) : (
                 <p className="text-sm text-muted-foreground">

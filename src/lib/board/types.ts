@@ -25,6 +25,9 @@ export const cardTypes = [
   "Question",
   "Evidence",
   "Screenshot",
+  "Idea",
+  "User",
+  "Problem",
   "Assumption",
   "Risk",
   "Contradiction",
@@ -43,6 +46,14 @@ export const cardTags = [
   "question",
   "experiment",
   "conclusion",
+  "critical",
+  "useful",
+  "optional",
+  "distracting",
+  "duplicate",
+  "competitor",
+  "inspiration",
+  "warning",
 ] as const;
 export type CardTag = (typeof cardTags)[number];
 

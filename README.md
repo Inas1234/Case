@@ -1,24 +1,39 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is a Next.js 16 application for managing investigation boards with Supabase persistence.
 
 ## Getting Started
 
-First, run the development server:
+1. Create your environment file from the template:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Set required values in `.env.local`:
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `DB_PASSWORD`
+- `OPENROUTER_API_KEY`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Optional OpenRouter settings:
+- `OPENROUTER_MODEL` (defaults to `openai/gpt-4o-mini`)
+- `OPENROUTER_FALLBACK_MODEL` (optional second model if primary fails/returns empty)
+- `OPENROUTER_SITE_URL` and `OPENROUTER_SITE_NAME` (for OpenRouter app attribution)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+3. Run the app:
+
+```bash
+pnpm dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+## AI Agent Route
+
+Board AI actions call:
+
+- `POST /api/ai/board-action`
+
+This route runs server-side, sends board context to OpenRouter, and returns structured board operations (new cards, card tag/type updates, summary updates, and status suggestions) aligned to the five board actions.
 
 ## Learn More
 
