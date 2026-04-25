@@ -1,7 +1,7 @@
 "use client";
 
 import { Download, LogOut, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { CanvasRouter } from "@/components/board/canvas-router";
@@ -26,6 +26,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { boardToMarkdown } from "@/lib/board/export";
+import {
+  clampBoardZoom,
+  DEFAULT_BOARD_PAN,
+  DEFAULT_BOARD_ZOOM,
+  type CanvasViewport,
+} from "@/lib/board/canvas";
 import {
   boardStatuses,
   cardTags,
@@ -52,6 +58,8 @@ type AiAction =
 
 const priorityTagOrder = ["critical", "useful", "optional", "distracting"] as const;
 const priorityTagSet = new Set<CardTag>(priorityTagOrder);
+const CARD_WIDTH = 430;
+const CARD_MIN_HEIGHT = 210;
 
 const typeToTag: Record<CardType, CardTag> = {
   Thought: "idea",
@@ -299,7 +307,12 @@ export function BoardWorkspace({
   const [selectedCardId, setSelectedCardId] = useState<string | null>(
     initialBoard?.cards[0]?.id ?? null,
   );
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(DEFAULT_BOARD_ZOOM);
+  const canvasViewportRef = useRef<CanvasViewport>({
+    pan: { ...DEFAULT_BOARD_PAN },
+    size: { width: 0, height: 0 },
+    zoom: DEFAULT_BOARD_ZOOM,
+  });
   const [isSaving, setIsSaving] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isDeletingCard, setIsDeletingCard] = useState(false);
@@ -580,6 +593,19 @@ export function BoardWorkspace({
     setErrorText("");
     const createdCount = board.cards.length + 1;
     const boardId = board.id;
+    const viewport = canvasViewportRef.current;
+    const canUseViewportSpawn =
+      viewport.size.width > 0 &&
+      viewport.size.height > 0 &&
+      viewport.zoom > 0;
+    const centerWorldX = canUseViewportSpawn
+      ? (viewport.size.width / 2 - viewport.pan.x) / viewport.zoom
+      : 160 + (createdCount % 2) * 470;
+    const centerWorldY = canUseViewportSpawn
+      ? (viewport.size.height / 2 - viewport.pan.y) / viewport.zoom
+      : 150 + (createdCount % 2) * 180;
+    const spawnX = Math.round(centerWorldX - CARD_WIDTH / 2);
+    const spawnY = Math.round(centerWorldY - CARD_MIN_HEIGHT / 2);
 
     const { data, error } = await supabase
       .from("board_cards")
@@ -590,8 +616,8 @@ export function BoardWorkspace({
         title: `${newCardType} ${createdCount}`,
         content: "Add details, evidence, or a sharper question.",
         tags: [typeToTag[newCardType]],
-        position_x: 160 + (createdCount % 2) * 470,
-        position_y: 150 + (createdCount % 2) * 180,
+        position_x: spawnX,
+        position_y: spawnY,
         ai_origin: false,
       })
       .select("*")
@@ -988,9 +1014,12 @@ export function BoardWorkspace({
     );
   };
 
-  const zoomIn = () => setZoom((prev) => Math.min(1.8, Number((prev + 0.1).toFixed(2))));
-  const zoomOut = () => setZoom((prev) => Math.max(0.6, Number((prev - 0.1).toFixed(2))));
-  const zoomReset = () => setZoom(1);
+  const zoomIn = () => setZoom((prev) => clampBoardZoom(prev + 0.1));
+  const zoomOut = () => setZoom((prev) => clampBoardZoom(prev - 0.1));
+  const zoomReset = () => setZoom(DEFAULT_BOARD_ZOOM);
+  const handleViewportChange = useCallback((viewport: CanvasViewport) => {
+    canvasViewportRef.current = viewport;
+  }, []);
 
   const handleSignOut = async () => {
     try {
@@ -1160,6 +1189,7 @@ export function BoardWorkspace({
                   onCardsChange={updateBoardCards}
                   onCardSelect={setSelectedCardId}
                   onZoomChange={setZoom}
+                  onViewportChange={handleViewportChange}
                 />
               </div>
             ) : (

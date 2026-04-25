@@ -10,6 +10,11 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { BoardCard } from "@/components/board/board-card";
+import {
+  clampBoardZoom,
+  DEFAULT_BOARD_PAN,
+  type CanvasViewport,
+} from "@/lib/board/canvas";
 import type { BoardCard as BoardCardModel } from "@/lib/board/types";
 
 interface DndKitCanvasProps {
@@ -19,13 +24,10 @@ interface DndKitCanvasProps {
   onCardsChange: (cards: BoardCardModel[]) => void;
   onCardSelect: (cardId: string) => void;
   onZoomChange: (zoom: number) => void;
+  onViewportChange: (viewport: CanvasViewport) => void;
 }
 
 type Offset = { x: number; y: number };
-
-function clampZoom(value: number) {
-  return Math.max(0.6, Math.min(1.8, Number(value.toFixed(2))));
-}
 
 function isZeroOffset(offset: Offset | undefined) {
   return !offset || (!offset.x && !offset.y);
@@ -38,6 +40,7 @@ export function DndKitCanvas({
   onCardsChange,
   onCardSelect,
   onZoomChange,
+  onViewportChange,
 }: DndKitCanvasProps) {
   const mounted = useSyncExternalStore(
     () => () => {},
@@ -46,7 +49,10 @@ export function DndKitCanvas({
   );
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isPanning, setIsPanning] = useState(false);
-  const [pan, setPan] = useState({ x: 340, y: 220 });
+  const [pan, setPan] = useState<{ x: number; y: number }>({
+    ...DEFAULT_BOARD_PAN,
+  });
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const zoomRef = useRef(zoom);
   const panStart = useRef<{
@@ -75,6 +81,39 @@ export function DndKitCanvas({
       return;
     }
 
+    const updateSize = () => {
+      setViewportSize({
+        width: node.clientWidth,
+        height: node.clientHeight,
+      });
+    };
+
+    updateSize();
+
+    const observer = new ResizeObserver(() => {
+      updateSize();
+    });
+    observer.observe(node);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    onViewportChange({
+      pan,
+      size: viewportSize,
+      zoom,
+    });
+  }, [onViewportChange, pan, viewportSize, zoom]);
+
+  useEffect(() => {
+    const node = viewportRef.current;
+    if (!node) {
+      return;
+    }
+
     const wheelHandler = (event: WheelEvent) => {
       if (!(event.ctrlKey || event.metaKey)) {
         return;
@@ -86,7 +125,7 @@ export function DndKitCanvas({
       const pointerX = event.clientX - rect.left;
       const pointerY = event.clientY - rect.top;
       const currentZoom = zoomRef.current;
-      const nextZoom = clampZoom(
+      const nextZoom = clampBoardZoom(
         currentZoom + (event.deltaY > 0 ? -0.08 : 0.08),
       );
 
